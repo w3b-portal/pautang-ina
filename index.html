@@ -1,0 +1,283 @@
+<?php
+session_start();
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+$correct_password = "101623";
+
+if (isset($_GET['logout'])) {
+    session_unset();
+    session_destroy();
+    header("Location: index.php"); 
+    exit;
+}
+
+$file = 'data.json';
+$data = file_exists($file) ? json_decode(file_get_contents($file), true) : [];
+
+// --- AUTO-PENALTY LOGIC ---
+$changed = false;
+foreach ($data as $idx => $d) {
+    $history = $d['history'] ?? [];
+    $bal = ($d['total'] ?? 0) - ($d['paid'] ?? 0);
+    if ($bal > 0 && isset($d['due'])) {
+        $dueTs = strtotime($d['due']);
+        if (time() >= $dueTs) {
+            $startDate = new DateTime($d['due']);
+            $endDate = new DateTime(date("Y-m-d"));
+            $interval = $startDate->diff($endDate);
+            $monthsOverdue = ($interval->y * 12) + $interval->m + 1;
+            $penaltiesRecorded = 0;
+            foreach ($history as $h) if (($h['type'] ?? '') === 'penalty') $penaltiesRecorded++;
+            if ($penaltiesRecorded < $monthsOverdue) {
+                for ($i = $penaltiesRecorded; $i < $monthsOverdue; $i++) {
+                    $pDate = date("Y-m-d", strtotime($d['due'] . " +$i month"));
+                    $data[$idx]['history'][] = ['type' => 'penalty', 'amount' => 200, 'date' => $pDate];
+                    $data[$idx]['total'] += 200;
+                }
+                $changed = true;
+            }
+        }
+    }
+}
+if ($changed) file_put_contents($file, json_encode($data));
+
+// --- FINAL ADJUSTED EXPORT (DATE ONLY - NO TIME) ---
+if (isset($_GET['export'])) {
+    $filename = "LedgerPro_Report_" . date('F_j_Y') . ".xls";
+    // DATE LANG ANG RETAIN NATIN DITO BES:
+    $generated_date = date('F j, Y'); 
+    
+    header("Content-Type: application/vnd.ms-excel; charset=utf-8");
+    header("Content-Disposition: attachment; filename=$filename");
+    echo "\xEF\xBB\xBF <html><head><meta http-equiv='Content-Type' content='text/html; charset=utf-8'>
+    <style>
+        /* SINIGURADO NATING HANGGANG 5 COLUMNS LANG ANG DESIGN */
+        td, th { border: 0.5pt solid #cccccc; padding: 10px; text-align: center; font-family: 'Segoe UI', Arial; }
+        .main-title { font-size: 16pt; font-weight: bold; background: #1e293b; color: #ffffff; border: 0.5pt solid #1e293b; }
+        .gen-date { font-size: 10pt; color: #64748b; background: #f8fafc; border: 0.5pt solid #cccccc; font-style: italic; }
+        .header-row th { background: #059669; color: #ffffff; font-weight: bold; border: 0.5pt solid #047857; }
+        .data-row td { background: #ffffff; }
+    </style></head><body>
+    <table>
+        <tr><th colspan='5' class='main-title'>LEDGERPRO FINANCIAL REPORT</th></tr>
+        <tr><td colspan='5' class='gen-date'>Report Date: {$generated_date}</td></tr>
+        <tr class='header-row'>
+            <th style='width:200px;'>CLIENT NAME</th>
+            <th style='width:120px;'>TOTAL LOAN</th>
+            <th style='width:120px;'>TOTAL PAID</th>
+            <th style='width:120px;'>BALANCE</th>
+            <th style='width:100px;'>STATUS</th>
+        </tr>";
+    foreach ($data as $d) {
+        $bal = ($d['total']??0) - ($d['paid']??0);
+        $status = $bal <= 0 ? "PAID" : (time() >= strtotime($d['due']??'now') ? "OVERDUE" : "ACTIVE");
+        echo "<tr class='data-row'>
+                <td>{$d['name']}</td>
+                <td>".number_format($d['total'])."</td>
+                <td>".number_format($d['paid'])."</td>
+                <td>".number_format($bal)."</td>
+                <td>$status</td>
+              </tr>";
+    }
+    echo "</table></body></html>"; exit;
+}
+
+if (!isset($_SESSION['logged_in'])) {
+    if (isset($_POST['password']) && $_POST['password'] === $correct_password) { $_SESSION['logged_in'] = true; header("Location: index.php"); exit; }
+?>
+    <!DOCTYPE html><html lang="en"><head><title>Login | PauTang-Ina</title><link rel="icon" type="image/png" href="loan_icon.png"><script src="https://cdn.tailwindcss.com"></script></head>
+    <body class="bg-[#0f172a] flex items-center justify-center min-h-screen text-white font-mono">
+        <div class="w-full max-w-md bg-slate-800/50 p-8 rounded-2xl border border-slate-700 shadow-2xl text-center">
+            <h2 class="text-2xl font-bold mb-8 uppercase tracking-widest text-emerald-500 italic">PauTang-Ina Kita</h2>
+            <form method="POST" class="space-y-4"><input type="password" name="password" placeholder="••••••••" required autofocus class="w-full bg-slate-900 border border-slate-700 p-3 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-center"><button class="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-xl font-bold uppercase transition">Unlock ➡</button></form>
+        </div>
+    </body></html>
+<?php exit; }
+
+// --- ACTIONS ---
+if(isset($_POST['add'])){
+    $amount = (int)$_POST['amount']; $interest = ceil($amount / 500) * 100; $total = $amount + $interest;
+    $start = date("Y-m-d"); $due = date("Y-m-d", strtotime($start.' +1 month +1 day'));
+    $data[] = ['name' => ucwords(strtolower($_POST['name'])), 'total' => $total, 'paid' => 0, 'start' => $start, 'due' => $due, 'history' => [['type' => 'principal', 'amount' => $amount, 'date' => $start],['type' => 'interest', 'amount' => $interest, 'date' => $start]]];
+    file_put_contents($file, json_encode($data)); header("Location: index.php?open=".(count($data)-1)); exit;
+}
+if(isset($_POST['pay'])){
+    $i=$_POST['index']; $amt=(int)$_POST['pay_amount']; $data[$i]['paid']+=$amt;
+    $data[$i]['history'][]=['type'=>'bayad', 'amount'=>$amt, 'date'=>date("Y-m-d")];
+    file_put_contents($file, json_encode($data)); header("Location: index.php?open=$i"); exit;
+}
+if(isset($_POST['delete'])){ array_splice($data,$_POST['index'],1); file_put_contents($file,json_encode($data)); header("Location: index.php"); exit; }
+
+// --- STATS ---
+$s_utang = 0; $s_paid = 0; $s_penalty = 0; $s_overdue = 0;
+foreach($data as $d){
+    $bal = ($d['total']??0) - ($d['paid']??0); $s_paid += ($d['paid']??0);
+    foreach(($d['history'] ?? []) as $h) if(($h['type']??'')=='penalty') $s_penalty += $h['amount'];
+    if($bal > 0) { $s_utang += $bal; if(time() >= strtotime($d['due']??'now')) $s_overdue++; }
+}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | PauTang-Ina</title>
+    <link rel="icon" type="image/png" href="loan_icon.png">
+    <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; scroll-behavior: smooth; }
+        .brand { font-family: 'Archivo Black', sans-serif; letter-spacing: -1.2px; }
+        .glass { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.08); }
+        .custom-scroll::-webkit-scrollbar { width: 5px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+        .tooltip { position: relative; display: inline-flex; }
+        .tooltip .tooltiptext { visibility: hidden; width: 90px; background-color: #0f172a; color: #10b981; text-align: center; border-radius: 6px; padding: 4px; position: absolute; z-index: 150; top: 110%; left: 50%; transform: translateX(-50%); opacity: 0; transition: opacity 0.2s; font-size: 8px; font-weight: 800; border: 1px solid #10b98133; pointer-events: none; white-space: nowrap;}
+        .tooltip:hover .tooltiptext { visibility: visible; opacity: 1; }
+    </style>
+</head>
+<body class="min-h-screen text-slate-200 overflow-x-hidden">
+
+    <div class="sticky top-0 z-[60]">
+        <nav class="glass border-b border-slate-800 relative z-[70]">
+            <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
+                <h1 class="brand text-xl italic bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent uppercase">PauTang-Ina Kita</h1>
+                <div class="flex gap-2">
+                    <div class="tooltip"><button onclick="toggleAddModal()" class="p-2 hover:bg-emerald-500/10 rounded-lg text-emerald-400 transition border border-emerald-500/20 cursor-pointer"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button><span class="tooltiptext uppercase">Add Client</span></div>
+                    <div class="tooltip"><a href="?export=true" class="p-2 hover:bg-cyan-500/10 rounded-lg text-cyan-400 transition border border-cyan-500/20 block cursor-pointer"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></a><span class="tooltiptext uppercase">Export Data</span></div>
+                    <div class="tooltip"><button onclick="confirmLogout()" class="p-2 hover:bg-red-500/10 rounded-lg text-red-400 transition border border-red-500/20 cursor-pointer"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button><span class="tooltiptext uppercase">Logout</span></div>
+                </div>
+            </div>
+        </nav>
+
+        <div class="bg-[#0f172a] pt-6 pb-2">
+            <div class="max-w-5xl mx-auto px-4">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div class="glass p-3 rounded-xl border-l-4 border-cyan-500"><p class="text-[9px] text-slate-500 font-bold uppercase mb-1">Balance</p><p class="text-sm font-bold text-white"><?php echo number_format($s_utang); ?></p></div>
+                    <div class="glass p-3 rounded-xl border-l-4 border-emerald-500"><p class="text-[9px] text-slate-500 font-bold uppercase mb-1">Collected</p><p class="text-sm font-bold text-emerald-400"><?php echo number_format($s_paid); ?></p></div>
+                    <div class="glass p-3 rounded-xl border-l-4 border-red-500"><p class="text-[9px] text-slate-500 font-bold uppercase mb-1">Penalties</p><p class="text-sm font-bold text-red-400"><?php echo number_format($s_penalty); ?></p></div>
+                    <div class="glass p-3 rounded-xl border-l-4 border-orange-500"><p class="text-[9px] text-slate-500 font-bold uppercase mb-1">Overdue</p><p class="text-sm font-bold text-orange-400"><?php echo $s_overdue; ?></p></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-[#0f172a]/95 backdrop-blur-md border-b border-slate-800">
+            <div class="max-w-5xl mx-auto px-4">
+                <div class="hidden md:flex items-center h-12 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                    <div class="w-1/3 pl-14">Lender</div>
+                    <div class="w-1/6 pl-4">Initial Loan</div>
+                    <div class="w-1/6 pl-4">Balance</div>
+                    <div class="w-1/3 flex items-center justify-between">
+                        <div class="w-full text-center">Status</div>
+                        <button onclick="toggleSearch()" class="p-2 hover:bg-slate-800 rounded-md transition text-slate-400 shrink-0 cursor-pointer border border-slate-700/30"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="searchContainer" class="hidden bg-slate-900 border-b border-slate-800 p-3"><div class="max-w-5xl mx-auto px-4"><input type="text" id="searchInput" onkeyup="filterRecords()" placeholder="Search client name..." class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500 text-slate-200"></div></div>
+    </div>
+
+    <div class="max-w-5xl mx-auto px-4 mt-6 pb-20">
+        <div id="recordList" class="space-y-4">
+            <?php foreach($data as $i=>$d): 
+                $bal = ($d['total']??0) - ($d['paid']??0);
+                $is_ovr = ($bal > 0 && time() >= strtotime($d['due'] ?? 'now'));
+                $history = $d['history'] ?? [];
+                $pens_total = 0; foreach($history as $h) if(($h['type']??'')=='penalty') $pens_total += $h['amount'];
+                $princ_total = 0; foreach($history as $h) if(($h['type']??'')=='principal') $princ_total += $h['amount'];
+                $intst_total = 0; foreach($history as $h) if(($h['type']??'')=='interest') $intst_total += $h['amount'];
+
+                if($bal <= 0) { $status = "PAID"; $s_c = "text-emerald-400 bg-emerald-400/10 border-emerald-500/20"; }
+                elseif($is_ovr) { $status = "OVERDUE"; $s_c = "text-red-500 bg-red-500/10 border-red-500/30"; }
+                else { $status = "ACTIVE"; $s_c = "text-cyan-400 bg-cyan-400/10 border-cyan-500/20"; }
+            ?>
+            <div class="record-item glass rounded-2xl border border-slate-800 overflow-hidden hover:border-slate-700 transition" data-name="<?php echo strtolower($d['name']); ?>">
+                <div onclick="toggleDetails(<?php echo $i;?>)" class="p-4 cursor-pointer flex items-center">
+                    <div class="w-full md:w-1/3 flex items-center gap-4">
+                        <div class="w-10 h-10 shrink-0 rounded-xl bg-slate-800 flex items-center justify-center font-bold text-emerald-400 border border-slate-700"><?php echo substr($d['name'], 0, 1); ?></div>
+                        <h3 class="font-bold text-slate-100 truncate"><?php echo $d['name'];?></h3>
+                    </div>
+                    <div class="hidden md:flex w-2/3 items-center">
+                        <div class="w-1/4 font-mono text-sm text-slate-400 pl-4"><?php echo number_format($princ_total); ?></div>
+                        <div class="w-1/4 font-mono font-bold text-white pl-4"><?php echo number_format($bal); ?></div>
+                        <div class="w-2/4 text-center"><span class="px-4 py-1.5 rounded-lg text-[10px] font-black border <?php echo $s_c; ?>"><?php echo $status; ?></span></div>
+                    </div>
+                    <div class="md:hidden ml-auto font-mono font-bold text-white"><?php echo number_format($bal); ?></div>
+                </div>
+
+                <div id="details<?php echo $i;?>" class="hidden border-t border-slate-800 bg-slate-900/60 p-6">
+                    <div class="flex flex-col md:flex-row gap-8">
+                        <div class="flex-grow space-y-6">
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 text-xs space-y-2">
+                                    <p class="text-[9px] text-slate-500 font-bold uppercase mb-2 tracking-widest">Financial Breakdown</p>
+                                    <div class="flex justify-between"><span>Principal:</span><span><?php echo number_format($princ_total); ?></span></div>
+                                    <div class="flex justify-between text-purple-400"><span>Interest:</span><span>+ <?php echo number_format($intst_total); ?></span></div>
+                                    <div class="flex justify-between text-red-400"><span>Penalty:</span><span>+ <?php echo number_format($pens_total); ?></span></div>
+                                    <div class="flex justify-between text-emerald-400 border-t border-slate-700 pt-2"><span>Total Paid:</span><span>- <?php echo number_format($d['paid']); ?></span></div>
+                                    <div class="flex justify-between text-white font-bold pt-1"><span>Current Balance:</span><span><?php echo number_format($bal); ?></span></div>
+                                </div>
+                                <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 text-xs space-y-2">
+                                    <p class="text-[9px] text-slate-500 font-bold uppercase mb-2 tracking-widest">Date Info</p>
+                                    <div class="flex justify-between"><span>Start:</span><span><?php echo date("F d, Y", strtotime($d['start'])); ?></span></div>
+                                    <div class="flex justify-between text-orange-400 font-bold"><span>Due:</span><span><?php echo date("F d, Y", strtotime($d['due'])); ?></span></div>
+                                </div>
+                            </div>
+                            <div class="space-y-1 max-h-48 overflow-y-auto pr-2 custom-scroll">
+                                <?php foreach(array_reverse($history) as $h): 
+                                    $ht = $h['type'] ?? 'unknown';
+                                    $h_c = ($ht=='penalty') ? 'text-red-500 border-red-500/10' : (($ht=='bayad') ? 'text-emerald-400 border-emerald-500/10' : (($ht=='principal') ? 'text-cyan-400 border-cyan-500/10' : 'text-purple-400 border-purple-500/10'));
+                                ?>
+                                <div class="flex justify-between items-center p-3 rounded-xl border bg-slate-900/50 <?php echo $h_c; ?>">
+                                    <div class="flex items-center gap-4 w-1/2"><span class="font-black uppercase text-[10px] w-20"><?php echo $ht;?></span><span class="text-[10px] opacity-60"><?php echo date("M d, Y", strtotime($h['date'])); ?></span></div>
+                                    <span class="font-mono font-bold text-white text-sm"><?php echo number_format($h['amount']);?></span>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                        <div class="md:w-64">
+                            <form method="POST" class="bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow-xl space-y-4">
+                                <input type="hidden" name="index" value="<?php echo $i;?>">
+                                <input name="pay_amount" type="number" placeholder=" 0.00" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-center font-bold text-white outline-none focus:ring-1 focus:ring-emerald-500">
+                                <button name="pay" class="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-xl font-bold text-xs uppercase">Pay</button>
+                                <button type="button" onclick="confirmDelete(<?php echo $i;?>)" class="w-full py-3 rounded-xl text-red-500 border border-red-500/20 text-[10px] font-bold uppercase hover:bg-red-600 hover:text-white transition">Delete Client</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+    </div>
+
+    <div id="addModal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/85 backdrop-blur-md p-4"><div class="bg-slate-800 p-8 rounded-3xl max-w-lg w-full border border-slate-700 shadow-2xl text-center"><h3 class="text-xl font-bold mb-6 text-emerald-500 uppercase tracking-widest">Add New Client</h3><form method="POST" autocomplete="off" class="space-y-4"><input id="lenderName" name="name" placeholder="Client Name" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 text-sm text-white"><input name="amount" type="number" placeholder="Loan Amount" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 text-sm text-white"><div class="flex gap-3 pt-4"><button type="button" onclick="toggleAddModal()" class="flex-1 bg-slate-700 py-4 rounded-xl font-bold text-xs uppercase text-slate-300">Cancel</button><button name="add" class="flex-1 bg-emerald-600 hover:bg-emerald-500 py-4 rounded-xl font-bold text-xs uppercase text-white shadow-lg">Save Record</button></div></form></div></div>
+    <div id="deleteModal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/90 backdrop-blur-sm p-4"><div class="bg-slate-800 p-8 rounded-3xl max-w-sm w-full border border-slate-700 text-center"><h3 class="text-lg font-bold mb-4 text-white uppercase">Confirm Delete?</h3><div class="flex gap-3"><button onclick="closeModals()" class="flex-1 bg-slate-700 py-3 rounded-xl font-bold text-xs uppercase text-slate-300">No</button><button onclick="submitDelete()" class="flex-1 bg-red-600 py-3 rounded-xl font-bold text-xs uppercase text-white shadow-lg">Delete</button></div><form id="deleteForm" method="POST" class="hidden"><input type="hidden" name="index" id="delIndex"><input type="hidden" name="delete"></form></div></div>
+    <div id="logoutModal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/90 backdrop-blur-sm p-4"><div class="bg-slate-800 p-8 rounded-3xl max-w-sm w-full border border-slate-700 text-center shadow-2xl"><h3 class="text-lg font-bold mb-6 text-white uppercase italic">Logout?</h3><div class="flex gap-3"><button onclick="closeModals()" class="flex-1 bg-slate-700 py-3 rounded-xl font-bold text-xs uppercase text-slate-300">Stay</button><button onclick="window.location='?logout=true'" class="flex-1 bg-red-600 py-3 rounded-xl font-bold text-xs uppercase text-white">Exit</button></div></div></div>
+
+    <script>
+        function toggleDetails(i) {
+            const target = document.getElementById('details' + i);
+            const isOpen = !target.classList.contains('hidden');
+            document.querySelectorAll('[id^="details"]').forEach(el => el.classList.add('hidden'));
+            if (!isOpen) { target.classList.remove('hidden'); setTimeout(() => { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 150); }
+        }
+        function toggleAddModal() { const modal = document.getElementById('addModal'); if(modal.classList.contains('hidden')) { modal.classList.remove('hidden'); modal.classList.add('flex'); setTimeout(() => { document.getElementById('lenderName').focus(); }, 200); } else { modal.classList.add('hidden'); modal.classList.remove('flex'); } }
+        function toggleSearch() { const s = document.getElementById('searchContainer'); s.classList.toggle('hidden'); if(!s.classList.contains('hidden')) document.getElementById('searchInput').focus(); }
+        function filterRecords() { const q = document.getElementById('searchInput').value.toLowerCase(); const rs = document.getElementsByClassName('record-item'); for(let r of rs) { r.style.display = r.getAttribute('data-name').includes(q) ? 'block' : 'none'; } }
+        window.onload = function() {
+            const url = new URLSearchParams(window.location.search);
+            const op = url.get('open');
+            if(op !== null) {
+                const t = document.getElementById('details' + op);
+                if(t) { t.classList.remove('hidden'); setTimeout(() => { t.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 300); window.history.replaceState({}, document.title, "index.php"); }
+            }
+        };
+        function confirmLogout() { document.getElementById('logoutModal').style.display = 'flex'; }
+        let idxToDelete = null;
+        function confirmDelete(i) { idxToDelete = i; document.getElementById('deleteModal').style.display = 'flex'; }
+        function closeModals() { document.getElementById('deleteModal').style.display = 'none'; document.getElementById('logoutModal').style.display = 'none'; document.getElementById('addModal').classList.add('hidden'); document.getElementById('addModal').classList.remove('flex'); }
+        function submitDelete() { document.getElementById('delIndex').value = idxToDelete; document.getElementById('deleteForm').submit(); }
+    </script>
+</body>
+</html>
